@@ -1,0 +1,86 @@
+README for nz_top version 0.01
+==============================
+
+ABOUT
+
+  nz_top is a 'top' clone for Netezza. The idea came from mytop and pgtop.
+
+  nz_top is a console-based (non-gui) tool for monitoring the performance
+  of Netezza. It runs on most Unix systems which have Perl and Term::ReadKey
+  installed. 
+
+  Netezza provides a Windows admin tool that monitors the performance of the database.
+  But it means that you have to use Windows to run the tool. This is meant to 
+  help the user to quickly see what is happening on the database.
+
+  The advantage of using this tool is that it can show you the plan files that
+  the Netezza optimizer will attempt to execute on the query. 
+
+REQUIREMENTS
+
+  TermReadKey from CPAN.
+  
+  If you will be using this outside of your Netezza box, then the Netezza client
+  needs to be installed since it will use the following files. Also, make sure that
+  these files are in your working path.
+
+  nzsession, nzstats, nzsql
+
+  Note that the tests will fail if the Netezza client is not installed or it cannot
+  find in your working path.
+
+  Tested on Netezza version 4.6.2 .
+
+INSTALLATION OF TermReadKey
+
+  cd /usr/local/src         # Could be any directory
+  wget http://search.cpan.org/CPAN/authors/id/J/JS/JSTOWE/TermReadKey-2.30.tar.gz
+  tar -zxf TermReadKey-2.30.tar.gz
+  cd TermRead*
+  perl Makefile.PL
+  make test
+  make
+  make install              # Need to be root
+  cd ..
+
+INSTALLATION OF NETEZZA CLIENT
+
+  The client tarball would typically look like this ( cli.package.tar.z ).
+
+  zcat cli.package.tar.z | tar  -xvf -
+  ./unpack                  # Make sure to unpack it in your working path.
+   
+INSTALLATION OF NZ_TOP
+
+  tar -zxvf nz_top-<version>.tar.gz
+  cd nz_top-<version>
+  perl Makefile.PL
+  make
+  make test
+  make install
+
+DOCUMENTATION
+
+  nz_top -?
+  perldoc nz_top
+
+AUTHOR
+
+  Jonathan Cua <jonathan.cua@gmail.com>
+
+COPYRIGHT AND LICENCE
+  Copyright MyPoints.com 2010
+
+  This program is free software; you can redistribute it and/or
+  modify it under the terms of the GNU General Public License
+  as published by the Free Software Foundation; either version 2
+  of the License, or (at your option) any later version.
+
+  This program is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with this program; if not, write to the Free Software
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.

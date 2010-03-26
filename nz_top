@@ -1,0 +1,554 @@
+#!/usr/bin/perl
+
+no warnings;
+use strict;
+use Term::ReadKey qw( ReadMode ReadKey GetTerminalSize );
+use Getopt::Std;
+
+=head1 NAME
+
+nz_top
+
+=head1 VERSION
+
+Version 0.01
+
+=cut
+
+our $VERSION = '0.01';
+
+=head1 SYNOPSIS
+
+nz_top is a 'top' clone for Netezza. The idea came from mytop and pgtop.
+
+nz_top is a console-based (non-gui) tool for monitoring the performance
+of Netezza. It runs on most Unix systems which have Perl and Term::ReadKey
+installed.
+
+Netezza provides a Windows admin tool that monitors the performance of the database.
+But it means that you have to use Windows to run the tool. This is meant to
+help the user to quickly see what is happening on the database on a Linux operating
+system.
+
+The advantage of using this tool is that it can show you the plan files that
+the Netezza optimizer will attempt to execute on the query.
+
+=head1 REQUIREMENTS
+
+TermReadKey from CPAN.
+
+If you will be using this outside of your Netezza box, then the Netezza client
+needs to be installed since it will use the following files. Also, make sure that
+these files are in your working path.
+
+nzsession, nzstats, nzsql
+
+Note that the tests will fail if the Netezza client is not installed or it cannot
+find in your working path.
+
+Tested on Netezza version 4.6.2 .
+
+=head1 OPTIONS
+
+The following options can be run while nz_top is active.
+
+? = Help.
+
+i = Filter active queries only.
+
+f = Get the full query. 
+
+    If you have a very long query, nzsession has a limit on the maximum number
+    of characters that it can display. This option will show you the entire query. 
+    Also, this will tell you when the query has started if the query is still running.
+
+e = Get the explain plan. 
+ 
+    The explain plans are physical files located in the Netezza box. Depending
+    on whether the plan is active or passive, the plan is located in a different
+    directory. This is useful if you want to know how Netezza will be executing
+    your query. Also, there is no plan related to system tables. 
+
+    Note: the plan files are not permanently stored, only the last 5,000 plan files
+    are stored.
+
+l = Show the longer version of the queries.
+
+    This will only show you up to 5,000 characters of the query.
+
+s = Change the refresh update (in seconds). Default is 10 seconds.
+
+k = Kill a session. 
+
+    This option will show you the full information of the session before it ask you
+    to abort it. Compared this with nzsession where it will only show you the id before
+    it kills the session. Showing all the information of the session is useful if 
+    you have a lot of sessions going on so that you can be sure that you are killing
+    the correct session.
+
+p = Pause the refresh.
+
+q = Quit.
+
+=cut
+
+getopts('?h:u:p:', \ my %opt);
+
+$|++;
+setpriority( 0, 0, 10 );
+
+my $host     = $opt{'h'} || 'localhost';
+my $user     = $opt{'u'} || $ENV{'NZ_USER'};
+my $password = $opt{'p'} || $ENV{'NZ_PASSWORD'};
+my $help   ||= $opt{'?'};
+
+Usage( 'Failed' ) if ( $help || !$user );
+
+my %config = ( 
+    host             => $host,
+    db               => 'system',                 # Default database.
+    user             => $user,
+    password         => $password,
+    idle             => 10,                       # Default refresh rate.
+    filter           => 0,
+    col_length       => 65,                       # Default column length.
+    active_plan_dir  => '/nz/data/plans',
+    passive_plan_dir => '/nz/kit/log/planshist',
+    nz_bin           => '',                       # Full path of nzsql, etc... can be placed here.
+);
+
+my $dispatch_for = {
+   'i' => \&Change_Filter_State,
+   'f' => \&Get_Full_Query,
+   'e' => \&Explain_Plan,
+   'l' => sub { ( $config{col_length} ) = $config{col_length} == 65 ? 5000 : 65 }, 
+   's' => \&Change_Idle_Time,
+   'k' => \&Kill_Session,
+   'p' => sub { print "\nPaused... Press <Enter> to continue.\n"; <> },
+   'q' => sub { ReadMode( 'normal' ); exit( 0 ) },
+   '?' => \&Usage,
+};
+
+my $nz_command = qq! $config{nz_bin}nzsql -q -host $config{host} !
+               . qq! -u $config{user} -pw $config{password} -d $config{db} !;
+
+my ($width, $height, $wpixels, $hpixels) = GetTerminalSize();
+my $host_width = 62;
+my $right_corner = $width - $host_width;
+
+Check_Netezza_Connection();                       # Make sure that it can connect to Netezza.
+
+my %session;
+my $version       = NZ_Version();
+my $uptime        = NZ_Uptime();
+my $total_queries = Get_Total_Queries_Today();
+
+Show_Data();
+
+
+###############
+#             #
+# Subroutines #
+#             #
+###############
+
+sub Check_Netezza_Connection {
+    my $raw = qx! $nz_command -l 2>&1 !;
+
+    if ( $raw =~ /Password authentication failed/ ) {
+        print qq{\nPassword authentication failed for user: "$config{user}".\n};
+        Usage( 'Failed' );
+    }
+
+    return;
+}
+
+sub NZ_Version {
+    my $sql = qq! select system_software_version from _v_system_info !;
+    my $raw = qx! $nz_command -c "$sql" !;
+
+    local $/;
+    my ($result) = $raw =~ /\s(\d.*)/;
+
+    return $result;
+}
+
+sub NZ_Uptime {
+    my $command = qq! $config{nz_bin}nzstats -host $config{host} -u $config{user} !
+                . qq! -pw $config{password} | grep 'Up Time Text' !;
+
+    my $raw = qx( $command ); 
+    my ($result) = $raw =~ /Up Time Text\s+(.*)/;
+
+    return $result;
+}
+
+sub Get_Total_Queries_Today {
+    my $sql = qq! select count(*) from NZ_QUERY_HISTORY_VIEW !
+            . qq! where qh_tstart >= date(now()) !;
+    my $raw = qx! $nz_command -c "$sql" !;
+ 
+    local $/;
+    my ($result) = $raw =~ /\s(\d+)\s/;
+ 
+    return $result;
+}
+
+sub Show_Data {
+    Clear();
+
+    while (1) {
+        my $current_time = sprintf "%02d:%02d:%02d", 
+          (localtime)[2], (localtime)[1], (localtime)[0];
+
+        printf "%-${host_width}s%-${right_corner}s", 
+          "Netezza Version: $version", "Time: $current_time";
+        printf "%-${host_width}s%-${right_corner}s", 
+          "Uptime: $uptime", "Estimated Total Queries Ran Today: $total_queries";
+        print "\n\n";
+
+        Parse_Session();
+
+        ReadMode( 'cbreak' );
+        my $char = ReadKey( $config{idle} );
+        defined $dispatch_for->{$char} && $dispatch_for->{$char}->();
+
+        Clear();
+    }
+
+    return;
+}
+
+sub Get_Session_Id {
+    ReadMode( 'normal' );
+    print "\nEnter the Session Id of the Query: ";
+
+    local $/ = "\n";
+    chomp( my $session_id = <> );
+    local $/;
+
+    return 0 if ( $session_id !~ /\d+/ );
+    return $session_id;
+}
+
+sub Get_Full_Query {
+    my $session_id = Get_Session_Id();
+    my $raw = do { local $/; Get_Plan_File( $session_id ) };
+
+    my ($result) = $raw =~ /\s+SQL:\s(.*)\n/;
+    my $query_time = Get_Query_Time( $session_id );
+
+    print "\n\nQuery started at: $query_time\n"
+      if ( uc( $session{$session_id}->{State} ) eq 'ACTIVE' );
+    print "\n$result\n";
+
+    Press_Key();
+    return;
+}
+
+sub Get_Query_Time {
+    my $session_id = shift;
+    my $sql;
+
+    my $short_query = substr( $session{$session_id}->{Command}, 0, 20 );
+    $short_query =~ s/\'/\\\'/;
+
+    if ( uc( $session{$session_id}->{State} ) eq 'ACTIVE' ) {
+        $sql = qq! select qs_tsubmit from _v_qrystat !
+             . qq! where qs_sessionid = $session_id !
+             . qq! and substr(qs_sql, 0, 21) = '$short_query' !;
+    }
+    else {
+        $sql = qq! select qh_tsubmit from _v_qryhist !
+             . qq! where qh_database = '$session{$session_id}->{Database}' !
+             . qq! and qh_user = '$session{$session_id}->{User}' !
+             . qq! and qh_sessionid = $session_id !
+             . qq! and substr(qh_sql, 0, 21) = '$short_query' !;
+    }
+
+    my $result = Execute_SQL( $sql );
+    return $result;
+}
+
+sub Explain_Plan {
+    my $session_id = Get_Session_Id();
+    my $result = Get_Plan_File( $session_id );
+    my $count_lines = 0;
+
+    Clear();
+   
+    open( my $fh, '<', \$result ) or die "Error could not open result set - $!";
+    while (<$fh>) {
+        print;
+        $count_lines++;
+        <> if ( ($count_lines % 40) == 0 );
+    }
+    close( $fh );
+
+    Press_Key();
+    Show_Data();
+    return;
+}
+
+sub Get_Plan_File {
+    my $session_id = shift;
+
+    my ($result, $plan_id);
+    my $nz_instance_id = Get_Instance_Id();
+
+    if ( uc( $session{$session_id}->{State} ) eq 'ACTIVE' ) {
+        $plan_id = Get_Plan_Id( $session_id, 1 );
+        return if ( $plan_id !~ /\d+?/ );
+       
+        my $active_plan_path  = "$config{active_plan_dir}/$plan_id/${plan_id}.pln";
+
+        my $active_sql  = qq! select * from external '$active_plan_path' !
+                        . qq! (nps_ext_file_read varchar(32767)) !
+                        . qq! using (crinstring true ctrlchars true !
+                        . qq! delimiter '' truncstring true) !;
+
+        $result = qx! $nz_command -c "$active_sql" !;
+    }
+    else {
+        $plan_id = Get_Plan_Id( $session_id, 0 );
+        return if ( $plan_id !~ /\d+?/ );
+    
+        my $passive_plan_path = "$config{passive_plan_dir}/$nz_instance_id/$plan_id/${plan_id}.pln";
+
+        my $passive_sql = qq! select * from external '$passive_plan_path' ! 
+                        . qq! (nps_ext_file_read varchar(32767)) !
+                        . qq! using (crinstring true ctrlchars true !
+                        . qq! delimiter '' truncstring true) !;
+
+        $result = qx! $nz_command -c "$passive_sql" !;
+    }
+
+    return $result;
+}    
+
+sub Get_Plan_Id {
+    my ($session_id, $is_active) = @_;
+    my $sql;
+
+    my $short_query = substr( $session{$session_id}->{Command}, 0, 20 );
+    $short_query =~ s/\'/\\\'/;
+
+    if ( $is_active == 1 ) {
+        $sql = qq! select max(qs_planid) from _v_qrystat ! 
+             . qq! where qs_sessionid = $session_id !
+             . qq! and substr(qs_sql, 0, 21) = '$short_query' !;
+    }
+    else { 
+        $sql = qq! select max(qh_planid) from _v_qryhist !
+             . qq! where qh_database = '$session{$session_id}->{Database}' !
+             . qq! and qh_user = '$session{$session_id}->{User}' !
+             . qq! and qh_sessionid = $session_id !
+             . qq! and substr(qh_sql, 0, 21) = '$short_query' !;
+    }
+    
+    my $result = Execute_SQL( $sql );
+
+    return $result;
+}
+ 
+sub Get_Instance_Id {
+    my $sql = qq! select val from _t_environ where name = 'NZ_INSTANCE' !;
+
+    my $result = Execute_SQL( $sql );
+
+    return $result;
+}
+
+sub Execute_SQL {
+    my $sql = shift;
+    my $raw = qx! $nz_command -c "$sql" !;
+
+    local $/;
+    my ($result) = $raw =~ /\s(\d+.*)\s/;
+
+    return $result;
+}
+
+sub Kill_Session {
+    ReadMode( 'normal' );
+    
+    print "\nEnter Session to kill: ";
+    chomp( my $session_id = <> );
+
+    return if ( $session_id !~ /^\d+?$/ );
+
+    printf "\n%-5s %-12s %-16s %-10s %-6s %-18s\n", "$session_id", "$session{$session_id}->{'User'}",
+           "$session{$session_id}->{'Database'}", "$session{$session_id}->{'Start_Time'}", 
+           "$session{$session_id}->{'State'}", "$session{$session_id}->{'Command'}";
+
+    return if ( ! $session{$session_id}->{'Database'} );
+
+    print "\nAre you sure you want to abort session $session_id (y|n)? ";
+
+    chomp( my $answer = <> );
+    
+    if ( lc( $answer ) eq 'y' ) {
+        my $command = qq! $config{nz_bin}nzsession abort -force -id $session_id !
+                    . qq! -host $config{host} -u $config{user} -pw $config{password} !;
+
+        my $raw = qx( $command );
+    }
+
+    return;
+}
+
+sub Clear {
+    system( "clear" );
+    return;
+}
+
+sub Press_Key {
+    print "\nPress <Enter> to continue.\n";
+    <>;
+    return;
+}
+
+sub Change_Idle_Time {
+    ReadMode( 'normal' );
+
+    print "\nSeconds of Delay: ";
+    my $seconds = <>;
+ 
+    if ( $seconds =~ /^(\d+?)$/ ) {
+       $config{idle} = $1;
+    }
+
+    return;
+}
+
+sub Change_Filter_State {
+    if ( $config{filter} == 1 ) {
+        print "\nShowing all States...\n";
+        $config{filter} = 0;
+    }
+    else {
+        print "\nShowing only Active States...\n";
+        $config{filter} = 1;
+    }
+
+    sleep 1;
+    return;
+}
+
+sub Parse_Session {
+    %session = ();
+    my @col_names = qw( Type User Start_Date Start_Time PDT PID
+                        Database State Priority Client_IP Client_PID Command );
+
+    open( my $fh, '-|', qq! $config{nz_bin}nzsession show -maxcolw $config{col_length} !
+      . qq! -host $config{host} -u $config{user} -pw $config{password} ! ) 
+      or die "Cannot execute nzsession";
+
+    while (<$fh>) {
+        my $id;
+
+        next if (/^ID/ || /^-----/ || /^$/ );
+        s/^(\d+)\s// and $id = $1;
+
+        my @rows = split( /\s+/, $_, 12 );
+        chomp $rows[-1];
+
+        for (my $i = 0; $i <= scalar(@rows) - 1; $i++) {
+            $session{$id}{$col_names[$i]} = $rows[$i];
+        }
+    }
+
+    close( $fh );
+
+    printf "%-5s %-12s %-16s %-10s %-6s %-18s\n", 'ID', 'User', 
+      'Database', 'Start Time', 'State', 'Command';
+    printf "%-5s %-12s %-16s %-10s %-6s %-18s\n", '-' x 5, '-' x 12, 
+      '-' x 16, '-' x 10, '-' x 5, '-' x 65;
+
+    for my $i ( sort keys %session ) {
+        next if ( $config{filter} == 1 &&  uc( $session{$i}->{'State'} ) ne 'ACTIVE' );
+        next if ( $session{$i}->{'Type'} eq '' );
+
+        printf "%-5s %-12s %-16s %-10s %-6s %-18s\n", "$i", "$session{$i}->{'User'}",
+               "$session{$i}->{'Database'}", "$session{$i}->{'Start_Time'}", 
+               "$session{$i}->{'State'}", "$session{$i}->{'Command'}";
+    }
+
+    return;
+}
+
+sub Usage {
+    my $check_status = shift;
+
+    ( $check_status ) ? print "\n" : print "\n\n";
+    print <<'HELP';
+Usage: nz_top -h <hostname|default: localhost> 
+              -u <user|default: NZ_USER user> 
+              -p <password|default: NZ_PASSWORD password>
+
+  ? = Help.
+  h = Hostname of Netezza.
+  u = Username.
+  p = Password.
+  i = Filter active queries only.
+  f = Get the full query and the time the query started.
+  e = Get the explain plan.
+      Note: There is no plan related to system tables.
+  l = Show the longer version of the queries.
+  s = Change the refresh update (in seconds). Default is 10 seconds.
+  k = Kill a session.
+  p = Pause the refresh.
+  q = Quit.
+
+nz_top is a 'top' clone for Netezza. 
+Note: the plan files are not permanently stored, only the last 5,000 plan files are stored.
+
+HELP
+
+    exit( 0 ) if ( $check_status eq 'Failed' );
+    Press_Key();
+    return;
+}
+
+=head1 AUTHOR
+
+Jonathan Cua, C<< <jonathan.cua at gmail.com> >>
+
+=head1 BUGS
+
+Going from Netezza 4.5.2 to Netezza 4.6.2, I know that Netezza made a change to nzsession.
+Unfortunately, I do not have access to 4.5.2. So, I could not remember what changes I did
+so that nz_top will work for both versions.
+
+Sometimes when retrieving the explain plan of query, it will not show anything. This is because if 
+nzsession is still showing that the query is active, then the code will try to look for
+it in the active plan directory. But it is possible the query has already been executed and therefore
+the code should have looked for the plan file in the plan history directory. Another possibility
+is that the plan files are not kept (the default is 5,000) and have already been purged, so if the
+code cannot find the plan file then it will show nothing on the screen.
+
+This is also the case when sometimes retrieving the full query does not show anything. The code
+has to get the plan file first and parse the information. If the plan file cannot be found, then
+the full query cannot be shown.
+
+Uptime does not show any values. I have seen this happen when you are using an SSL encryption to 
+connection to Netezza.
+
+=head1 SUPPORT
+
+You can find documentation for this code with the perldoc command.
+
+perldoc nz_top
+
+=head1 COPYRIGHT & LICENSE
+
+Copyright 2010 Jonathan Cua.
+
+This program is free software; you can redistribute it and/or modify it under the terms of 
+either: the GNU General Public License as published by the Free Software Foundation; or 
+the Artistic License.
+
+See http://dev.perl.org/licenses/ for more information.
+
+=cut
+

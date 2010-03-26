@@ -1,0 +1,8 @@
+Changes
+MANIFEST
+Makefile.PL
+nz_top
+README
+t/00-nzsession.t
+t/01-nzstats.t
+t/02-nzsql.t
